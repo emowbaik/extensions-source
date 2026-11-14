@@ -36,7 +36,7 @@ private val TICKET_REGEX = Regex("""T([0-9a-f]{3,6}),\s*(p1\.[A-Za-z0-9_.\-]+)""
 private val READER_CHUNK_REGEX = Regex("""/_next/static/chunks/app/series/[^"'\s]*?/page-[0-9a-f]+\.js""")
 
 /** Server action reference, e.g. `createServerReference("<id>",...,"unlockChapterPages")`. */
-private val ACTION_ID_REGEX = Regex("""createServerReference\("([0-9a-f]{40,})"[^)]*?unlockChapterPages""")
+private val ACTION_ID_REGEX = Regex("""createServerReference\)?\(\s*"([0-9a-f]{40,})"[^)]*?unlockChapterPages""")
 
 private val IMAGE_REGEX = Regex("""https://cdn\.voratoon\.com/[^"\\\s]+""")
 private val REASON_REGEX = Regex("""\\?"reason\\?":\\?"([a-z_]+)\\?""")
@@ -159,7 +159,7 @@ abstract class VoraToon : KeiSource() {
             error("Halaman chapter tidak bisa dibuka. Coba lagi sebentar lagi.")
         }
 
-        return images.mapIndexed { index, imageUrl -> Page(index, url = chapterUrl, imageUrl = imageUrl) }
+        return images.mapIndexed { index, imageUrl -> Page(index, url = imageUrl, imageUrl = imageUrl) }
     }
 
     /**
@@ -170,19 +170,22 @@ abstract class VoraToon : KeiSource() {
         var actionId = unlockChapterPagesActionId(chapterUrl)
 
         repeat(2) { attempt ->
-            runCatching { unlockChapterPages(chapterUrl, actionId, listOf(ticket)) }
-                .getOrNull()
-                ?.takeIf { it.images.isNotEmpty() }
-                ?.let { return it.images }
+            val result = runCatching { unlockChapterPages(chapterUrl, actionId, listOf(ticket)) }.getOrNull()
+            result?.images?.takeIf { it.isNotEmpty() }?.let { return it }
 
-            runCatching { getTurnstileToken(chapterUrl, TURNSTILE_SITE_KEY, action = TURNSTILE_ACTION) }
-                .getOrNull()
-                ?.let { token ->
+            // A challenge means the server wants a Turnstile token for this action.
+            if (result?.reason == "challenge") {
+                val token = runCatching { getTurnstileToken(chapterUrl, TURNSTILE_SITE_KEY, action = TURNSTILE_ACTION) }
+                    .getOrNull()
+
+                if (token != null) {
                     runCatching { unlockChapterPages(chapterUrl, actionId, listOf(ticket, token)) }
                         .getOrNull()
-                        ?.takeIf { it.images.isNotEmpty() }
-                        ?.let { return it.images }
+                        ?.images
+                        ?.takeIf { it.isNotEmpty() }
+                        ?.let { return it }
                 }
+            }
 
             // Action ids rotate on every site deployment, so rediscover once before giving up.
             if (attempt == 0) {
@@ -231,6 +234,8 @@ abstract class VoraToon : KeiSource() {
 
     override fun getImageRequest(page: Page): Request = super.getImageRequest(page).newBuilder()
         .fetch(Fetch.IMAGE.from(page.url))
+        // The CDN serves images only when the site is the referer (403 otherwise).
+        .header("Referer", "$baseUrl/")
         .build()
 
     override val supportsFilterFetching: Boolean get() = true
